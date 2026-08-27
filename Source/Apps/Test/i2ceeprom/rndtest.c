@@ -1,19 +1,55 @@
-/* RNDTEST.C -- minimal random-data write/read-back test for a single
+/* RNDTEST.C -- minimal random-data write/read-back test for an
    I2CEEPROM DIO unit, via the real HBIOS DIO dispatch (BF_DIOSEEK/
-   READ/WRITE). Scoped strictly to DIODEV_I2CEEPROM ($12).
-   Finds the I2CEEPROM unit automatically (DIO unit numbers are
-   assigned globally across every enabled driver in init order, not
-   per-driver, so it is not reliably unit 0), then tests block 0.
-   No arguments needed.
+   READ/WRITE). Scoped strictly to DIODEV_I2CEEPROM ($12). Always tests
+   block 0.
+
+   No argument: auto-selects if exactly one I2CEEPROM unit is active,
+   otherwise lists all active units (or says none found) and stops.
+   One argument (unit number): tests that specific unit directly.
  */
 
 #include <stdio.h>
 #include "hbio.h"
 
 #define DIODEV_I2CEEPROM 0x12
-#define MAXBLKSIZ	256	/* largest possible I2CEEPROMBLKSIZ */
+#define MAXBLKSIZ	128	/* driver caps SHIFT at 7, BLKSIZ can't exceed this */
+#define MAXUNITS	16	/* devinfo() scan range, 0-15 */
 
 unsigned char wbuf[MAXBLKSIZ], rbuf[MAXBLKSIZ];
+
+unsigned char *tail = (unsigned char *)0x80;
+unsigned char tailidx, taillen;
+
+nexttoken(buf, maxlen)
+char *buf;
+unsigned char maxlen;
+{
+    unsigned char n;
+
+    while (tailidx <= taillen && tail[tailidx] == ' ')
+	tailidx++;
+    n = 0;
+    while (tailidx <= taillen && tail[tailidx] != ' ' && n < maxlen - 1) {
+	buf[n] = tail[tailidx];
+	n++;
+	tailidx++;
+    }
+    buf[n] = 0;
+    return n;
+}
+
+parsenum(s)
+char *s;
+{
+    unsigned int v;
+
+    v = 0;
+    while (*s >= '0' && *s <= '9') {
+	v = v * 10 + (*s - '0');
+	s++;
+    }
+    return v;
+}
 
 dumpbuf(label, buf, len)
 char *label;
@@ -44,33 +80,76 @@ getrseed()
 #endasm
 }
 
-/* find the one I2CEEPROM unit among all registered DIO units. returns
-   the unit number, or -1 if none found */
-findunit()
+/* scan all DIO units for I2CEEPROM devices, filling units[] with their
+   unit numbers. returns the count found (0 if none) */
+scanunits(units)
+unsigned char *units;
 {
-    unsigned char u, dtype;
+    unsigned char u, dtype, cnt;
     unsigned int addr;
 
-    for (u = 0; u <= 15; u++) {
-	if (devinfo(u, &dtype, &addr) == 0 && dtype == DIODEV_I2CEEPROM)
-	    return u;
+    cnt = 0;
+    for (u = 0; u < MAXUNITS; u++) {
+	if (devinfo(u, &dtype, &addr) == 0 && dtype == DIODEV_I2CEEPROM) {
+	    units[cnt] = u;
+	    cnt++;
+	}
     }
-    return -1;
+    return cnt;
+}
+
+/* print one line per active unit: number, I2C address, geometry */
+listunits(units, cnt)
+unsigned char *units;
+unsigned char cnt;
+{
+    unsigned char i, u, dtype;
+    unsigned int addr, blksz, blkcnt;
+
+    for (i = 0; i < cnt; i++) {
+	u = units[i];
+	devinfo(u, &dtype, &addr);
+	blksz = blksize(u, &blkcnt);
+	printf("Unit %u: I2C ADDR=0x%02x BLKSIZ=%u BLKCNT=%u\n",
+	    u, addr, blksz, blkcnt);
+    }
 }
 
 main()
 {
-    unsigned char i, x, mismatch, bank;
+    char unitstr[8];
+    unsigned char i, x, mismatch, bank, dtype;
     char unit;
-    unsigned int blksz, blkcnt;
+    unsigned char units[MAXUNITS], cnt;
+    unsigned int addr, blksz, blkcnt;
 
     bank = getbank();
     getrseed();
 
-    unit = findunit();
-    if (unit == -1) {
-	printf("No I2CEEPROM unit found.\n");
-	return;
+    taillen = tail[0];
+    tailidx = 1;
+
+    if (nexttoken(unitstr, sizeof(unitstr)) != 0) {
+	/* explicit unit given, use it directly */
+	unit = parsenum(unitstr);
+	if (devinfo(unit, &dtype, &addr) != 0 || dtype != DIODEV_I2CEEPROM) {
+	    printf("Unit %u is not an I2CEEPROM device.\n", unit);
+	    return;
+	}
+    } else {
+	cnt = scanunits(units);
+	if (cnt == 0) {
+	    printf("No I2CEEPROM units found.\n");
+	    return;
+	}
+	if (cnt == 1) {
+	    unit = units[0];
+	} else {
+	    printf("%u I2CEEPROM units found:\n", cnt);
+	    listunits(units, cnt);
+	    printf("Re-run with a unit number to test one, e.g. RNDTEST %u\n", units[0]);
+	    return;
+	}
     }
 
     blksz = blksize(unit, &blkcnt);
